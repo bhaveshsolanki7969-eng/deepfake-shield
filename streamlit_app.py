@@ -1,5 +1,7 @@
 import os
 import cv2
+import io
+import re
 import numpy as np
 import torch
 import streamlit as st
@@ -9,8 +11,10 @@ from fpdf import FPDF
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 
+# Page configuration
 st.set_page_config(page_title="Deepfake Shield AI", layout="wide", page_icon="🛡️")
 
+# Custom Dark Theme & Cyan Button Styling
 st.markdown("""
 <style>
     .header-box {
@@ -39,9 +43,23 @@ st.markdown("""
         font-weight: 600;
         margin: 0 4px;
     }
+    /* Set action buttons to vibrant Cyan / Slate theme */
+    div.stButton > button:first-child {
+        background: linear-gradient(90deg, #0284c7, #2563eb) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        font-size: 1.05rem !important;
+        padding: 10px 24px !important;
+    }
+    div.stButton > button:first-child:hover {
+        background: linear-gradient(90deg, #0369a1, #1d4ed8) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# 1. Hardware & Model Caching
 @st.cache_resource
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,8 +73,13 @@ def load_models():
 
 device, face_detector, processor, model, MODEL_NAME = load_models()
 
+# 2. PDF Report Generator (Emoji Sanitized)
 def generate_pdf_report(verdict_clean, confidence, status_msg_clean, face_img, cam_img):
     try:
+        # Strip non-ASCII characters / emojis so standard Helvetica font does not throw errors
+        sanitized_verdict = re.sub(r'[^\x00-\x7F]+', '', verdict_clean).strip()
+        sanitized_msg = re.sub(r'[^\x00-\x7F]+', '', status_msg_clean).strip()
+
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
@@ -92,7 +115,7 @@ def generate_pdf_report(verdict_clean, confidence, status_msg_clean, face_img, c
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(4)
         
-        if "MANIPULATED" in verdict_clean or "DEEPFAKE" in verdict_clean:
+        if "MANIPULATED" in sanitized_verdict or "DEEPFAKE" in sanitized_verdict:
             box_color = (254, 242, 242)
             border_color = (239, 68, 68)
             text_color = (185, 28, 28)
@@ -109,7 +132,7 @@ def generate_pdf_report(verdict_clean, confidence, status_msg_clean, face_img, c
         pdf.set_xy(15, start_y + 3)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(*text_color)
-        pdf.cell(100, 7, f"Verdict: {verdict_clean}")
+        pdf.cell(100, 7, f"Verdict: {sanitized_verdict}")
         
         pdf.set_font("Helvetica", "B", 11)
         pdf.set_text_color(15, 23, 42)
@@ -118,7 +141,7 @@ def generate_pdf_report(verdict_clean, confidence, status_msg_clean, face_img, c
         pdf.set_xy(15, start_y + 12)
         pdf.set_font("Helvetica", "", 9)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(0, 6, status_msg_clean, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, sanitized_msg, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(12)
         
         pdf.set_font("Helvetica", "B", 11)
@@ -148,11 +171,13 @@ def generate_pdf_report(verdict_clean, confidence, status_msg_clean, face_img, c
         if os.path.exists(temp_cam_path):
             os.remove(temp_cam_path)
             
-        return pdf.output()
+        pdf_bytes = pdf.output()
+        return bytes(pdf_bytes) if isinstance(pdf_bytes, bytearray) else pdf_bytes.encode('latin1')
     except Exception as ex:
         st.error(f"PDF generation error: {ex}")
         return None
 
+# Header UI
 st.markdown("""
 <div class="header-box">
     <div class="header-title">Deepfake Shield & Facial Forensics</div>
@@ -166,6 +191,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Layout Columns
 col1, col2 = st.columns([1, 1], gap="medium")
 
 with col1:
@@ -183,7 +209,7 @@ if uploaded_file is not None:
     input_pil = Image.open(uploaded_file).convert("RGB")
     
     with col1:
-        st.image(input_pil, caption="Source Media", use_container_width=True)
+        st.image(input_pil, caption="Source Media", width=420)
 
     if scan_button:
         with st.spinner("Analyzing biometric boundaries and frequency spectrum..."):
@@ -192,7 +218,7 @@ if uploaded_file is not None:
             if face_box is None:
                 w, h = input_pil.size
                 crop_face = input_pil.crop((w * 0.15, h * 0.15, w * 0.85, h * 0.85))
-                ui_badge = "⚠️ Central frame analyzed (fallback)."
+                ui_badge = "Central frame analyzed (fallback)."
             else:
                 x1, y1, x2, y2 = map(int, face_box[0])
                 pad_x = int((x2 - x1) * 0.1)
@@ -203,8 +229,9 @@ if uploaded_file is not None:
                     min(input_pil.width, x2 + pad_x),
                     min(input_pil.height, y2 + pad_y)
                 ))
-                ui_badge = "✅ Facial bounding box isolated."
+                ui_badge = "Facial bounding box isolated."
 
+            # Evaluation
             if inference_mode == "Demo Preset: Verified Authentic":
                 real_score, fake_score = 0.9840, 0.0160
                 desc_text = f"{ui_badge} Manual audit preset: Verified authentic human capture."
@@ -227,12 +254,14 @@ if uploaded_file is not None:
                     fake_score, real_score = 0.9420, 0.0580
                     desc_text = f"{ui_badge} Facial boundary blending anomalies and synthesis artifacts isolated."
 
+            # Visual Heatmap
             face_np = np.array(crop_face.resize((224, 224)))
             gray = cv2.cvtColor(face_np, cv2.COLOR_RGB2GRAY)
             edges = cv2.Canny(gray, 40, 140)
             heatmap = cv2.applyColorMap(edges, cv2.COLORMAP_JET)
             cam_viz = cv2.addWeighted(face_np, 0.7, cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB), 0.3, 0)
 
+            # Decision
             if fake_score > real_score:
                 verdict = "MANIPULATED / DEEPFAKE"
                 status_color = "#ef4444"
@@ -261,15 +290,16 @@ if uploaded_file is not None:
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.image(crop_face, caption="Isolated Face", use_container_width=True)
+                    st.image(crop_face, caption="Isolated Face", width=240)
                 with c2:
-                    st.image(cam_viz, caption="Forensic Artifact Map", use_container_width=True)
+                    st.image(cam_viz, caption="Forensic Artifact Map", width=240)
 
+                # PDF Report
                 pdf_data = generate_pdf_report(verdict, top_score, desc_text, crop_face, cam_viz)
                 if pdf_data:
                     st.download_button(
                         label="Download Forensic Audit Report (PDF)",
-                        data=bytes(pdf_data),
+                        data=pdf_data,
                         file_name=f"Forensic_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                         mime="application/pdf",
                         use_container_width=True
