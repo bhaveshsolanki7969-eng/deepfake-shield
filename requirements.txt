@@ -1,0 +1,10 @@
+torch
+torchvision
+gradio>=4.0.0
+opencv-python-headless
+facenet-pytorch
+numpy
+Pillow
+grad-cam
+fpdf2
+transformers
